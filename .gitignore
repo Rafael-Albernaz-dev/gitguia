@@ -1,0 +1,36 @@
+# Binaries & build artifacts
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Governance & Private Agent Docs (Strict hygiene - never stage or commit)
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.agents/
+.codex/
+.gemini/
+
+# Environment files & Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local state & caches
+.gitguia/
+*.log
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
