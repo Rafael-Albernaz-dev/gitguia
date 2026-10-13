@@ -12,6 +12,11 @@ import (
 type Runner interface {
 	Exec(ctx context.Context, dir string, args ...string) (string, error)
 	Version(ctx context.Context) (string, error)
+	ListWorktrees(ctx context.Context, repoDir string) (string, error)
+	Status(ctx context.Context, wsDir string) (string, error)
+	AheadBehind(ctx context.Context, wsDir string) (int, int, error)
+	DiffCached(ctx context.Context, wsDir string) (string, error)
+	Diff(ctx context.Context, wsDir string) (string, error)
 }
 
 // NativeRunner executes Git via system subprocesses.
@@ -60,4 +65,43 @@ func (r *NativeRunner) Version(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// ListWorktrees executes `git worktree list --porcelain -z`.
+func (r *NativeRunner) ListWorktrees(ctx context.Context, repoDir string) (string, error) {
+	return r.Exec(ctx, repoDir, "worktree", "list", "--porcelain", "-z")
+}
+
+// Status executes `git status --porcelain -z`.
+func (r *NativeRunner) Status(ctx context.Context, wsDir string) (string, error) {
+	return r.Exec(ctx, wsDir, "status", "--porcelain", "-z")
+}
+
+// AheadBehind queries commits ahead and behind upstream. Returns (0, 0, nil) if no upstream is set.
+func (r *NativeRunner) AheadBehind(ctx context.Context, wsDir string) (int, int, error) {
+	out, err := r.Exec(ctx, wsDir, "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
+	if err != nil {
+		// Typically means no upstream configured, which is normal for local branches.
+		return 0, 0, nil
+	}
+
+	fields := strings.Fields(strings.TrimSpace(out))
+	if len(fields) != 2 {
+		return 0, 0, nil
+	}
+
+	var ahead, behind int
+	fmt.Sscanf(fields[0], "%d", &ahead)
+	fmt.Sscanf(fields[1], "%d", &behind)
+	return ahead, behind, nil
+}
+
+// DiffCached returns staged diff.
+func (r *NativeRunner) DiffCached(ctx context.Context, wsDir string) (string, error) {
+	return r.Exec(ctx, wsDir, "diff", "--cached")
+}
+
+// Diff returns unstaged diff.
+func (r *NativeRunner) Diff(ctx context.Context, wsDir string) (string, error) {
+	return r.Exec(ctx, wsDir, "diff")
 }

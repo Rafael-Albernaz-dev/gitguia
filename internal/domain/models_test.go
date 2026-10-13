@@ -19,11 +19,22 @@ func TestChangeSet_IsClean(t *testing.T) {
 	csDirty := domain.ChangeSet{
 		WorkspacePath: "/path/to/ws",
 		Files: []domain.FileStatus{
-			{Path: "main.go", Unstaged: "M"},
+			{Path: "main.go", Staged: "M", Unstaged: ""},
+			{Path: "app.go", Staged: "", Unstaged: "M"},
+			{Path: "new.go", Staged: "?", Unstaged: "?"},
 		},
 	}
 	if csDirty.IsClean() {
 		t.Errorf("expected changeset with files not to be clean")
+	}
+	if got := csDirty.StagedCount(); got != 1 {
+		t.Errorf("expected StagedCount 1, got %d", got)
+	}
+	if got := csDirty.UnstagedCount(); got != 1 {
+		t.Errorf("expected UnstagedCount 1, got %d", got)
+	}
+	if got := csDirty.UntrackedCount(); got != 1 {
+		t.Errorf("expected UntrackedCount 1, got %d", got)
 	}
 }
 

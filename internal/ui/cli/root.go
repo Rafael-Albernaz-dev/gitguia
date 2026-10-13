@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/Rafael-Albernaz-dev/gitguia/internal/app"
+	"github.com/Rafael-Albernaz-dev/gitguia/internal/domain"
 	"github.com/Rafael-Albernaz-dev/gitguia/internal/git"
 	"github.com/Rafael-Albernaz-dev/gitguia/internal/version"
 	"github.com/charmbracelet/lipgloss"
@@ -23,6 +26,29 @@ var (
 	successStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#04B575"))
+
+	warnStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFB86C"))
+
+	errorStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FF5555"))
+
+	branchStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#8BE9FD"))
+
+	activeMarkerStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#50FA7B"))
+
+	headerStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#BD93F9")).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderBottom(true).
+			BorderForeground(lipgloss.Color("#44475A"))
 )
 
 // NewRootCmd initializes the root Cobra command and its subcommands.
@@ -106,8 +132,202 @@ func newListCmd(appCore *app.App) *cobra.Command {
 		Aliases: []string{"ls"},
 		Short:   "List active worktrees and their Git statuses",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println(titleStyle.Render("Worktree Discovery") + " (Scheduled for slice GGUIA-002)")
-			fmt.Println(subtleStyle.Render("Parsing worktrees with 'git worktree list --porcelain -z'..."))
+			ctx := context.Background()
+
+			worktrees, err := appCore.ListWorktrees(ctx, ".")
+			if err != nil {
+				return err
+			}
+
+			if len(worktrees) == 0 {
+				fmt.Println(subtleStyle.Render("No worktrees found."))
+				return nil
+			}
+
+			cwd, _ := os.Getwd()
+			proj, _ := appCore.ResolveProject(ctx, ".")
+
+			fmt.Println()
+			fmt.Printf("%s  %-24s %-32s %-10s %s\n",
+				headerStyle.Render("  "),
+				headerStyle.Render("BRANCH"),
+				headerStyle.Render("PATH"),
+				headerStyle.Render("COMMIT"),
+				headerStyle.Render("STATUS"),
+			)
+
+			for _, ws := range worktrees {
+				marker := "  "
+				if ws.IsCurrent {
+					marker = activeMarkerStyle.Render("● ")
+				} else if ws.IsMain {
+					marker = subtleStyle.Render("○ ")
+				}
+
+				branchName := ws.Branch
+				if ws.IsMain {
+					branchName = branchStyle.Render(ws.Branch) + subtleStyle.Render(" (main)")
+				} else {
+					branchName = branchStyle.Render(ws.Branch)
+				}
+
+				// Relative display path
+				displayPath := ws.Path
+				if proj != nil {
+					if ws.Path == proj.RootPath {
+						displayPath = "./"
+					} else if rel, err := filepath.Rel(filepath.Dir(proj.RootPath), ws.Path); err == nil && !strings.HasPrefix(rel, "..") {
+						displayPath = "../" + rel
+					} else if rel, err := filepath.Rel(cwd, ws.Path); err == nil {
+						displayPath = rel
+					}
+				}
+
+				shortCommit := ws.CommitHash
+				if len(shortCommit) > 7 {
+					shortCommit = shortCommit[:7]
+				}
+
+				// Status badges
+				var statusBadge string
+				if ws.IsLocked {
+					statusBadge = errorStyle.Render("🔒 locked")
+					if ws.LockReason != "" {
+						statusBadge += subtleStyle.Render(" (" + ws.LockReason + ")")
+					}
+				} else if ws.Status != nil {
+					if ws.Status.IsClean() {
+						statusBadge = successStyle.Render("✓ clean")
+					} else {
+						var parts []string
+						if st := ws.Status.StagedCount(); st > 0 {
+							parts = append(parts, successStyle.Render(fmt.Sprintf("+%d", st)))
+						}
+						if unst := ws.Status.UnstagedCount(); unst > 0 {
+							parts = append(parts, warnStyle.Render(fmt.Sprintf("~%d", unst)))
+						}
+						if untr := ws.Status.UntrackedCount(); untr > 0 {
+							parts = append(parts, subtleStyle.Render(fmt.Sprintf("?%d", untr)))
+						}
+						statusBadge = warnStyle.Render("dirty") + " (" + strings.Join(parts, " ") + ")"
+					}
+
+					if ws.Status.Ahead > 0 || ws.Status.Behind > 0 {
+						syncPart := ""
+						if ws.Status.Ahead > 0 {
+							syncPart += fmt.Sprintf("↑%d", ws.Status.Ahead)
+						}
+						if ws.Status.Behind > 0 {
+							syncPart += fmt.Sprintf("↓%d", ws.Status.Behind)
+						}
+						statusBadge += " " + subtleStyle.Render(syncPart)
+					}
+				} else {
+					statusBadge = subtleStyle.Render("unknown")
+				}
+
+				fmt.Printf("%s %-24s %-32s %-10s %s\n",
+					marker,
+					branchName,
+					subtleStyle.Render(displayPath),
+					subtleStyle.Render(shortCommit),
+					statusBadge,
+				)
+			}
+			fmt.Println()
+			return nil
+		},
+	}
+}
+
+func newStatusCmd(appCore *app.App) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status [workspace]",
+		Short: "Display workspace status, changes, and staged diffs",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			target := ""
+			if len(args) > 0 {
+				target = args[0]
+			}
+
+			ws, cs, err := appCore.GetWorkspaceStatus(ctx, ".", target)
+			if err != nil {
+				return err
+			}
+
+			fmt.Println()
+			header := fmt.Sprintf("Workspace: %s  |  Branch: %s",
+				titleStyle.Render(ws.Path),
+				branchStyle.Render(ws.Branch),
+			)
+			if ws.IsMain {
+				header += subtleStyle.Render(" [main tree]")
+			}
+			fmt.Println(header)
+
+			if len(ws.CommitHash) > 7 {
+				fmt.Printf("HEAD: %s", subtleStyle.Render(ws.CommitHash[:7]))
+				if cs.Ahead > 0 || cs.Behind > 0 {
+					fmt.Printf(" (ahead %d, behind %d)", cs.Ahead, cs.Behind)
+				}
+				fmt.Println()
+			}
+			fmt.Println()
+
+			if cs.IsClean() {
+				fmt.Println(successStyle.Render("✓ Working tree clean (no staged or unstaged changes)"))
+				fmt.Println()
+				return nil
+			}
+
+			// Group files into Staged, Unstaged, and Untracked
+			var stagedFiles []domain.FileStatus
+			var unstagedFiles []domain.FileStatus
+			var untrackedFiles []domain.FileStatus
+
+			for _, f := range cs.Files {
+				if f.Staged == "?" || f.Unstaged == "?" {
+					untrackedFiles = append(untrackedFiles, f)
+					continue
+				}
+				if f.Staged != "" && f.Staged != " " {
+					stagedFiles = append(stagedFiles, f)
+				}
+				if f.Unstaged != "" && f.Unstaged != " " {
+					unstagedFiles = append(unstagedFiles, f)
+				}
+			}
+
+			if len(stagedFiles) > 0 {
+				fmt.Println(successStyle.Render("Changes to be committed:") + subtleStyle.Render(" (staged for next commit)"))
+				for _, f := range stagedFiles {
+					pathStr := f.Path
+					if f.OrigPath != "" {
+						pathStr = f.OrigPath + " -> " + f.Path
+					}
+					fmt.Printf("  %s  %s\n", successStyle.Render(f.Staged), pathStr)
+				}
+				fmt.Println()
+			}
+
+			if len(unstagedFiles) > 0 {
+				fmt.Println(warnStyle.Render("Changes not staged for commit:") + subtleStyle.Render(" (use 'git add <file>...')"))
+				for _, f := range unstagedFiles {
+					fmt.Printf("  %s  %s\n", warnStyle.Render(f.Unstaged), f.Path)
+				}
+				fmt.Println()
+			}
+
+			if len(untrackedFiles) > 0 {
+				fmt.Println(errorStyle.Render("Untracked files:") + subtleStyle.Render(" (unversioned files)"))
+				for _, f := range untrackedFiles {
+					fmt.Printf("  ?  %s\n", subtleStyle.Render(f.Path))
+				}
+				fmt.Println()
+			}
+
 			return nil
 		},
 	}
@@ -130,17 +350,6 @@ func newSpawnCmd(appCore *app.App) *cobra.Command {
 
 	cmd.Flags().StringVarP(&baseBranch, "base", "b", "main", "Base branch to branch off from")
 	return cmd
-}
-
-func newStatusCmd(appCore *app.App) *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Display workspace status, changes, and staged diffs",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println(titleStyle.Render("Workspace Status") + " (Scheduled for slice GGUIA-002)")
-			return nil
-		},
-	}
 }
 
 func newCommitCmd(appCore *app.App) *cobra.Command {
