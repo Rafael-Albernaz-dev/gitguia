@@ -17,6 +17,10 @@ type Runner interface {
 	AheadBehind(ctx context.Context, wsDir string) (int, int, error)
 	DiffCached(ctx context.Context, wsDir string) (string, error)
 	Diff(ctx context.Context, wsDir string) (string, error)
+	BranchExists(ctx context.Context, repoDir string, branch string) (bool, error)
+	WorktreeAdd(ctx context.Context, repoDir, branch, targetPath, baseBranch string, checkoutExisting bool) error
+	WorktreeRemove(ctx context.Context, repoDir, targetPath string, force bool) error
+	BranchDelete(ctx context.Context, repoDir, branch string, force bool) error
 }
 
 // NativeRunner executes Git via system subprocesses.
@@ -104,4 +108,48 @@ func (r *NativeRunner) DiffCached(ctx context.Context, wsDir string) (string, er
 // Diff returns unstaged diff.
 func (r *NativeRunner) Diff(ctx context.Context, wsDir string) (string, error) {
 	return r.Exec(ctx, wsDir, "diff")
+}
+
+// BranchExists checks if a local branch already exists in the repository.
+func (r *NativeRunner) BranchExists(ctx context.Context, repoDir string, branch string) (bool, error) {
+	_, err := r.Exec(ctx, repoDir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	if err == nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+// WorktreeAdd provisions a new Git worktree.
+func (r *NativeRunner) WorktreeAdd(ctx context.Context, repoDir, branch, targetPath, baseBranch string, checkoutExisting bool) error {
+	var args []string
+	if checkoutExisting {
+		args = []string{"worktree", "add", targetPath, branch}
+	} else {
+		args = []string{"worktree", "add", "-b", branch, targetPath, baseBranch}
+	}
+
+	_, err := r.Exec(ctx, repoDir, args...)
+	return err
+}
+
+// WorktreeRemove tears down a worktree directory.
+func (r *NativeRunner) WorktreeRemove(ctx context.Context, repoDir, targetPath string, force bool) error {
+	args := []string{"worktree", "remove"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, targetPath)
+
+	_, err := r.Exec(ctx, repoDir, args...)
+	return err
+}
+
+// BranchDelete deletes a local branch.
+func (r *NativeRunner) BranchDelete(ctx context.Context, repoDir, branch string, force bool) error {
+	flag := "-d"
+	if force {
+		flag = "-D"
+	}
+	_, err := r.Exec(ctx, repoDir, "branch", flag, branch)
+	return err
 }

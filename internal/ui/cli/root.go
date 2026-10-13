@@ -335,6 +335,9 @@ func newStatusCmd(appCore *app.App) *cobra.Command {
 
 func newSpawnCmd(appCore *app.App) *cobra.Command {
 	var baseBranch string
+	var targetDir string
+	var checkoutExisting bool
+	var copyFiles []string
 
 	cmd := &cobra.Command{
 		Use:   "spawn <branch-name>",
@@ -342,13 +345,38 @@ func newSpawnCmd(appCore *app.App) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			branch := args[0]
-			fmt.Println(titleStyle.Render("Spawn Workspace") + " (Scheduled for slice GGUIA-003)")
-			fmt.Printf("Provisioning worktree for branch: %s (base: %s)\n", branch, baseBranch)
+			ctx := context.Background()
+
+			res, err := appCore.SpawnWorkspace(ctx, ".", app.SpawnOptions{
+				BranchName:       branch,
+				BaseBranch:       baseBranch,
+				TargetDir:        targetDir,
+				CheckoutExisting: checkoutExisting,
+				CopyFiles:        copyFiles,
+			})
+			if err != nil {
+				return err
+			}
+
+			fmt.Println()
+			fmt.Printf("%s Workspace provisioned successfully!\n", successStyle.Render("✓"))
+			fmt.Println()
+			fmt.Printf("  %-10s %s\n", subtleStyle.Render("Branch:"), branchStyle.Render(res.Workspace.Branch))
+			fmt.Printf("  %-10s %s\n", subtleStyle.Render("Path:"), titleStyle.Render(res.Workspace.Path))
+			if len(res.CopiedFiles) > 0 {
+				fmt.Printf("  %-10s %s\n", subtleStyle.Render("Copied:"), successStyle.Render(strings.Join(res.CopiedFiles, ", ")))
+			}
+			fmt.Println()
+			fmt.Println(subtleStyle.Render("To switch to your new workspace:"))
+			fmt.Printf("  cd %s\n\n", res.Workspace.Path)
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVarP(&baseBranch, "base", "b", "main", "Base branch to branch off from")
+	cmd.Flags().StringVarP(&targetDir, "dir", "d", "", "Custom destination directory for the worktree")
+	cmd.Flags().BoolVarP(&checkoutExisting, "checkout", "c", false, "Checkout existing branch instead of creating new")
+	cmd.Flags().StringSliceVar(&copyFiles, "copy", nil, "Extra files to copy from the main workspace (can be repeated)")
 	return cmd
 }
 

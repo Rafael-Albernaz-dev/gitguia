@@ -138,3 +138,78 @@ func TestApp_ListWorktrees_And_Status(t *testing.T) {
 
 	_ = secondDir
 }
+
+func TestApp_SpawnWorkspace(t *testing.T) {
+	mainDir, _ := setupTestGitRepo(t)
+
+	// Add .env and .env.local to mainDir
+	_ = os.WriteFile(filepath.Join(mainDir, ".env"), []byte("FOO=bar\n"), 0644)
+	_ = os.WriteFile(filepath.Join(mainDir, ".env.local"), []byte("LOCAL=secret\n"), 0600)
+	_ = os.WriteFile(filepath.Join(mainDir, "extra.conf"), []byte("EXTRA=1\n"), 0644)
+
+	runner, err := git.NewNativeRunner()
+	if err != nil {
+		t.Fatalf("failed to initialize NativeRunner: %v", err)
+	}
+
+	application := app.NewApp(runner)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. Successful spawn
+	res, err := application.SpawnWorkspace(ctx, mainDir, app.SpawnOptions{
+		BranchName: "feat/spawn-test",
+		BaseBranch: "main",
+		CopyFiles:  []string{"extra.conf"},
+	})
+	if err != nil {
+		t.Fatalf("SpawnWorkspace failed: %v", err)
+	}
+
+	if res.Workspace.Branch != "feat/spawn-test" {
+		t.Errorf("expected branch 'feat/spawn-test', got %q", res.Workspace.Branch)
+	}
+
+	// Verify that destination folder was created and has files
+	if _, err := os.Stat(res.Workspace.Path); err != nil {
+		t.Errorf("destination workspace path does not exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(res.Workspace.Path, ".env")); err != nil {
+		t.Errorf(".env was not copied to workspace")
+	}
+	if _, err := os.Stat(filepath.Join(res.Workspace.Path, ".env.local")); err != nil {
+		t.Errorf(".env.local was not copied to workspace")
+	}
+	if _, err := os.Stat(filepath.Join(res.Workspace.Path, "extra.conf")); err != nil {
+		t.Errorf("extra.conf was not copied to workspace")
+	}
+
+	// 2. Collision: Try to spawn the exact same branch again without --checkout
+	_, err = application.SpawnWorkspace(ctx, mainDir, app.SpawnOptions{
+		BranchName: "feat/spawn-test",
+		BaseBranch: "main",
+	})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("expected collision error for existing branch, got: %v", err)
+	}
+
+	// 3. Reuse branch with CheckoutExisting:
+	// First, create a branch that is not currently checked out anywhere
+	runCmd(t, mainDir, "git", "branch", "feat/unattached", "main")
+
+	customDir := filepath.Join(t.TempDir(), "wt-checkout-reuse")
+	resCheckout, err := application.SpawnWorkspace(ctx, mainDir, app.SpawnOptions{
+		BranchName:       "feat/unattached",
+		TargetDir:        customDir,
+		CheckoutExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected checkout error: %v", err)
+	}
+	if resCheckout.Workspace.Path != customDir {
+		t.Errorf("expected customDir %q, got %q", customDir, resCheckout.Workspace.Path)
+	}
+	if resCheckout.Workspace.Branch != "feat/unattached" {
+		t.Errorf("expected branch 'feat/unattached', got %q", resCheckout.Workspace.Branch)
+	}
+}
