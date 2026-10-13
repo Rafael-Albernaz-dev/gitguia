@@ -213,3 +213,68 @@ func TestApp_SpawnWorkspace(t *testing.T) {
 		t.Errorf("expected branch 'feat/unattached', got %q", resCheckout.Workspace.Branch)
 	}
 }
+
+func TestApp_RemoveWorkspace_Safety(t *testing.T) {
+	mainDir, secondDir := setupTestGitRepo(t)
+
+	runner, err := git.NewNativeRunner()
+	if err != nil {
+		t.Fatalf("failed to initialize NativeRunner: %v", err)
+	}
+
+	application := app.NewApp(runner)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. Guard against removing main workspace
+	_, err = application.RemoveWorkspace(ctx, mainDir, "main", true)
+	if err == nil || !strings.Contains(err.Error(), "main working tree") {
+		t.Errorf("expected error removing main workspace, got: %v", err)
+	}
+
+	// 2. Guard against removing active workspace (when called from secondDir)
+	_, err = application.RemoveWorkspace(ctx, secondDir, "feat/test", true)
+	if err == nil || !strings.Contains(err.Error(), "active workspace") {
+		t.Errorf("expected error removing active workspace, got: %v", err)
+	}
+
+	// 3. Guard against removing secondary workspace with dirty changes (secondDir has dirty.txt)
+	// From mainDir, attempt to remove secondDir without force
+	_, err = application.RemoveWorkspace(ctx, mainDir, "feat/test", false)
+	if err == nil || !strings.Contains(err.Error(), "safety check blocked removal") {
+		t.Errorf("expected safety blocked error for dirty workspace, got: %v", err)
+	}
+
+	// 4. Guard against removing secondary workspace with ignored files
+	// Clean the untracked dirty.txt, but add an ignored file .env
+	_ = os.Remove(filepath.Join(secondDir, "dirty.txt"))
+	_ = os.WriteFile(filepath.Join(secondDir, ".gitignore"), []byte(".env*\n"), 0644)
+	runCmd(t, secondDir, "git", "add", ".gitignore")
+	runCmd(t, secondDir, "git", "commit", "-m", "add gitignore")
+	_ = os.WriteFile(filepath.Join(secondDir, ".env"), []byte("SECRET=123\n"), 0600)
+
+	_, err = application.RemoveWorkspace(ctx, mainDir, "feat/test", false)
+	if err == nil || !strings.Contains(err.Error(), "safety check blocked removal") {
+		t.Errorf("expected safety blocked error for ignored file, got: %v", err)
+	}
+
+	// 5. Successful removal with --force
+	report, err := application.RemoveWorkspace(ctx, mainDir, "feat/test", true)
+	if err != nil {
+		t.Fatalf("failed to remove workspace with force: %v", err)
+	}
+	if report == nil {
+		t.Fatalf("expected safety report")
+	}
+
+	// Verify that destination directory no longer exists
+	if _, err := os.Stat(secondDir); !os.IsNotExist(err) {
+		t.Errorf("expected secondDir to be removed, but still exists on disk")
+	}
+
+	// Verify that the branch 'feat/test' is PRESERVED in Git
+	exists, err := runner.BranchExists(ctx, mainDir, "feat/test")
+	if err != nil || !exists {
+		t.Errorf("expected branch 'feat/test' to remain preserved in Git history, exists=%v, err=%v", exists, err)
+	}
+}

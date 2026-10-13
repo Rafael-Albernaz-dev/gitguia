@@ -119,6 +119,7 @@ const (
 	ViolationUntrackedFiles   SafetyViolationType = "untracked_files"
 	ViolationIgnoredFiles     SafetyViolationType = "ignored_sensitive_files"
 	ViolationMainWorkspace    SafetyViolationType = "cannot_remove_main_workspace"
+	ViolationActiveWorkspace  SafetyViolationType = "cannot_remove_active_workspace"
 	ViolationBranchConflict   SafetyViolationType = "branch_conflict"
 	ViolationPathConflict     SafetyViolationType = "path_conflict"
 )

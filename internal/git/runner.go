@@ -20,7 +20,9 @@ type Runner interface {
 	BranchExists(ctx context.Context, repoDir string, branch string) (bool, error)
 	WorktreeAdd(ctx context.Context, repoDir, branch, targetPath, baseBranch string, checkoutExisting bool) error
 	WorktreeRemove(ctx context.Context, repoDir, targetPath string, force bool) error
+	WorktreePrune(ctx context.Context, repoDir string) (string, error)
 	BranchDelete(ctx context.Context, repoDir, branch string, force bool) error
+	IgnoredFiles(ctx context.Context, wsDir string) ([]string, error)
 }
 
 // NativeRunner executes Git via system subprocesses.
@@ -144,6 +146,11 @@ func (r *NativeRunner) WorktreeRemove(ctx context.Context, repoDir, targetPath s
 	return err
 }
 
+// WorktreePrune removes administrative data for worktrees that no longer exist on disk.
+func (r *NativeRunner) WorktreePrune(ctx context.Context, repoDir string) (string, error) {
+	return r.Exec(ctx, repoDir, "worktree", "prune")
+}
+
 // BranchDelete deletes a local branch.
 func (r *NativeRunner) BranchDelete(ctx context.Context, repoDir, branch string, force bool) error {
 	flag := "-d"
@@ -152,4 +159,28 @@ func (r *NativeRunner) BranchDelete(ctx context.Context, repoDir, branch string,
 	}
 	_, err := r.Exec(ctx, repoDir, "branch", flag, branch)
 	return err
+}
+
+// IgnoredFiles returns a list of files or directories ignored by Git in the specified workspace.
+func (r *NativeRunner) IgnoredFiles(ctx context.Context, wsDir string) ([]string, error) {
+	out, err := r.Exec(ctx, wsDir, "status", "--porcelain=v1", "--ignored", "-z")
+	if err != nil {
+		return nil, err
+	}
+
+	if len(out) == 0 {
+		return nil, nil
+	}
+
+	tokens := strings.Split(out, "\x00")
+	var ignored []string
+	for _, t := range tokens {
+		if strings.HasPrefix(t, "!! ") {
+			path := strings.TrimPrefix(t, "!! ")
+			if path != "" && path != ".git/" && path != ".git" {
+				ignored = append(ignored, path)
+			}
+		}
+	}
+	return ignored, nil
 }

@@ -21,6 +21,9 @@ type Service interface {
 	ListWorktrees(ctx context.Context, currentDir string) ([]*domain.Workspace, error)
 	GetWorkspaceStatus(ctx context.Context, currentDir string, targetIdentifier string) (*domain.Workspace, *domain.ChangeSet, error)
 	SpawnWorkspace(ctx context.Context, currentDir string, opts SpawnOptions) (*SpawnResult, error)
+	AuditWorkspaceSafety(ctx context.Context, currentDir string, ws *domain.Workspace) (*domain.SafetyReport, error)
+	RemoveWorkspace(ctx context.Context, currentDir string, targetIdentifier string, force bool) (*domain.SafetyReport, error)
+	PruneWorkspaces(ctx context.Context, currentDir string) (string, error)
 }
 
 // SpawnOptions holds parameters for provisioning a new worktree.
@@ -245,13 +248,134 @@ func (a *App) SpawnWorkspace(ctx context.Context, currentDir string, opts SpawnO
 
 	return &SpawnResult{
 		Workspace: &domain.Workspace{
-			Path:       absTargetDir,
-			Branch:     opts.BranchName,
-			IsMain:     false,
-			IsCurrent:  false,
-			CreatedAt:  time.Now(),
+			Path:      absTargetDir,
+			Branch:    opts.BranchName,
+			IsMain:    false,
+			IsCurrent: false,
+			CreatedAt: time.Now(),
 		},
 		CopiedFiles:    copiedFiles,
 		IsReusedBranch: opts.CheckoutExisting,
 	}, nil
+}
+
+// AuditWorkspaceSafety performs a multi-vector risk audit on a workspace before deletion.
+func (a *App) AuditWorkspaceSafety(ctx context.Context, currentDir string, ws *domain.Workspace) (*domain.SafetyReport, error) {
+	var violations []domain.SafetyViolation
+
+	// 1. Guard against removing the main repository working tree
+	if ws.IsMain {
+		violations = append(violations, domain.SafetyViolation{
+			Type:        domain.ViolationMainWorkspace,
+			Description: "cannot remove main working tree; only secondary worktrees can be removed",
+			ItemPath:    ws.Path,
+		})
+	}
+
+	// 2. Guard against removing the current active directory
+	absCurrent, _ := filepath.Abs(currentDir)
+	absWs, _ := filepath.Abs(ws.Path)
+	if ws.IsCurrent || absCurrent == absWs {
+		violations = append(violations, domain.SafetyViolation{
+			Type:        domain.ViolationActiveWorkspace,
+			Description: "cannot remove active workspace currently in use; switch to another directory first ('cd ..')",
+			ItemPath:    ws.Path,
+		})
+	}
+
+	// 3. Inspect staged, unstaged and untracked changes
+	if ws.Status != nil {
+		if st := ws.Status.StagedCount(); st > 0 {
+			violations = append(violations, domain.SafetyViolation{
+				Type:        domain.ViolationDirtyWorkingTree,
+				Description: fmt.Sprintf("workspace has %d staged change(s) not committed", st),
+				ItemPath:    ws.Path,
+			})
+		}
+		if unst := ws.Status.UnstagedCount(); unst > 0 {
+			violations = append(violations, domain.SafetyViolation{
+				Type:        domain.ViolationDirtyWorkingTree,
+				Description: fmt.Sprintf("workspace has %d unstaged modification(s)", unst),
+				ItemPath:    ws.Path,
+			})
+		}
+		if untr := ws.Status.UntrackedCount(); untr > 0 {
+			violations = append(violations, domain.SafetyViolation{
+				Type:        domain.ViolationUntrackedFiles,
+				Description: fmt.Sprintf("workspace has %d untracked file(s) that would be permanently lost", untr),
+				ItemPath:    ws.Path,
+			})
+		}
+	}
+
+	// 4. Inspect ignored files (like .env, certs, etc.)
+	ignored, err := a.gitRunner.IgnoredFiles(ctx, ws.Path)
+	if err == nil && len(ignored) > 0 {
+		previewCount := len(ignored)
+		if previewCount > 3 {
+			previewCount = 3
+		}
+		preview := strings.Join(ignored[:previewCount], ", ")
+		violations = append(violations, domain.SafetyViolation{
+			Type:        domain.ViolationIgnoredFiles,
+			Description: fmt.Sprintf("workspace contains %d ignored file(s) that would be permanently deleted (%s)", len(ignored), preview),
+			ItemPath:    ws.Path,
+		})
+	}
+
+	return &domain.SafetyReport{
+		IsSafe:     len(violations) == 0,
+		Violations: violations,
+	}, nil
+}
+
+// RemoveWorkspace safely removes a worktree after auditing safety constraints.
+func (a *App) RemoveWorkspace(ctx context.Context, currentDir string, targetIdentifier string, force bool) (*domain.SafetyReport, error) {
+	proj, err := a.ResolveProject(ctx, currentDir)
+	if err != nil {
+		return nil, err
+	}
+
+	ws, _, err := a.GetWorkspaceStatus(ctx, currentDir, targetIdentifier)
+	if err != nil {
+		return nil, err
+	}
+
+	report, err := a.AuditWorkspaceSafety(ctx, currentDir, ws)
+	if err != nil {
+		return nil, fmt.Errorf("safety audit failed: %w", err)
+	}
+
+	// Check fatal invariants that can NEVER be overridden even with --force
+	for _, v := range report.Violations {
+		if v.Type == domain.ViolationMainWorkspace || v.Type == domain.ViolationActiveWorkspace {
+			return report, fmt.Errorf("blocked: %s", v.Description)
+		}
+	}
+
+	// If there are other violations (dirty, untracked, ignored) and force is false, block
+	if !report.IsSafe && !force {
+		return report, fmt.Errorf("safety check blocked removal: %d violation(s) found", len(report.Violations))
+	}
+
+	// Execute Git worktree remove
+	if err := a.gitRunner.WorktreeRemove(ctx, proj.RootPath, ws.Path, force); err != nil {
+		return report, fmt.Errorf("failed to remove git worktree: %w", err)
+	}
+
+	// If directory still exists on disk (due to untracked/ignored residues), clean it up
+	if _, err := os.Stat(ws.Path); err == nil {
+		_ = os.RemoveAll(ws.Path)
+	}
+
+	return report, nil
+}
+
+// PruneWorkspaces executes git worktree prune.
+func (a *App) PruneWorkspaces(ctx context.Context, currentDir string) (string, error) {
+	proj, err := a.ResolveProject(ctx, currentDir)
+	if err != nil {
+		return "", err
+	}
+	return a.gitRunner.WorktreePrune(ctx, proj.RootPath)
 }

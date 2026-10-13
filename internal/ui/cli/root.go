@@ -88,6 +88,7 @@ func NewRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newCommitCmd(appCore))
 	rootCmd.AddCommand(newPushCmd(appCore))
 	rootCmd.AddCommand(newRmCmd(appCore))
+	rootCmd.AddCommand(newPruneCmd(appCore))
 
 	return rootCmd
 }
@@ -406,17 +407,68 @@ func newRmCmd(appCore *app.App) *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
-		Use:   "rm <worktree-name>",
-		Short: "Safely teardown a worktree checking for uncommitted and ignored files",
-		Args:  cobra.ExactArgs(1),
+		Use:     "rm <worktree-name>",
+		Aliases: []string{"remove"},
+		Short:   "Safely teardown a worktree checking for uncommitted and ignored files",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := args[0]
-			fmt.Println(titleStyle.Render("Safe Teardown") + " (Scheduled for slice GGUIA-004)")
-			fmt.Printf("Inspecting worktree safety for: %s (force: %v)\n", target, force)
+			ctx := context.Background()
+
+			report, err := appCore.RemoveWorkspace(ctx, ".", target, force)
+			if err != nil {
+				fmt.Println()
+				fmt.Println(errorStyle.Render("🛑 Worktree Removal Blocked"))
+				fmt.Printf("Safety guards prevented deletion of workspace %s:\n\n", titleStyle.Render(target))
+
+				if report != nil && len(report.Violations) > 0 {
+					canForce := true
+					for _, v := range report.Violations {
+						fmt.Printf("  %s %s\n", warnStyle.Render("•"), v.Description)
+						if v.Type == domain.ViolationMainWorkspace || v.Type == domain.ViolationActiveWorkspace {
+							canForce = false
+						}
+					}
+					fmt.Println()
+					if canForce {
+						fmt.Println(subtleStyle.Render("Hint: To permanently discard uncommitted/ignored files, run:"))
+						fmt.Printf("  gitguia rm %s --force\n\n", target)
+					}
+				} else {
+					fmt.Printf("  %s %s\n\n", warnStyle.Render("•"), err.Error())
+				}
+				return err
+			}
+
+			fmt.Println()
+			fmt.Printf("%s Worktree removed successfully!\n", successStyle.Render("✓"))
+			fmt.Printf("  Target: %s\n", subtleStyle.Render(target))
+			fmt.Printf("  %s Branch remains preserved in Git.\n\n", subtleStyle.Render("ℹ Note:"))
 			return nil
 		},
 	}
 
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "Force teardown bypassing safety checks")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Force teardown bypassing uncommitted and ignored files check")
 	return cmd
+}
+
+func newPruneCmd(appCore *app.App) *cobra.Command {
+	return &cobra.Command{
+		Use:   "prune",
+		Short: "Prune linked worktrees information from Git database",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			out, err := appCore.PruneWorkspaces(ctx, ".")
+			if err != nil {
+				return err
+			}
+			fmt.Println()
+			fmt.Printf("%s Worktree administrative references pruned.\n", successStyle.Render("✓"))
+			if strings.TrimSpace(out) != "" {
+				fmt.Println(subtleStyle.Render(strings.TrimSpace(out)))
+			}
+			fmt.Println()
+			return nil
+		},
+	}
 }
